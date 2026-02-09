@@ -25,6 +25,19 @@ var ignoredDirs = map[string]bool{
 	".cache":       true,
 }
 
+// isInIgnoredDir checks if any component of the path matches an ignored directory name.
+// This catches files inside directories that were created AFTER the watcher started
+// (e.g., .next/dev/package.json when Next.js creates .next at runtime).
+func isInIgnoredDir(path string) bool {
+	components := strings.Split(path, string(os.PathSeparator))
+	for _, component := range components {
+		if ignoredDirs[component] {
+			return true
+		}
+	}
+	return false
+}
+
 // shouldIgnoreFile returns true if the file path should be ignored from triggering restarts.
 // This filters out lock files and other generated files that tools frequently modify.
 func shouldIgnoreFile(path string) bool {
@@ -81,6 +94,11 @@ func New(rootPath string, extensions []string) (<-chan Event, error) {
 				}
 
 				if event.Op.Has(fsnotify.Write) || event.Op.Has(fsnotify.Create) {
+					// Skip files inside ignored directories (e.g., .next created at runtime)
+					if isInIgnoredDir(event.Name) {
+						continue
+					}
+
 					// Skip files that should be ignored (lock files, etc.)
 					if shouldIgnoreFile(event.Name) {
 						continue
