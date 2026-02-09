@@ -14,6 +14,30 @@ type Event struct {
 	Path string // The path to the file that changed.
 }
 
+// ignoredDirs contains directory names that should be skipped during watching.
+// These are typically generated/dependency directories that cause spurious restarts.
+var ignoredDirs = map[string]bool{
+	"node_modules": true,
+	".next":        true,
+	".git":         true,
+	"dist":         true,
+	"build":        true,
+	".cache":       true,
+}
+
+// shouldIgnoreFile returns true if the file path should be ignored from triggering restarts.
+// This filters out lock files and other generated files that tools frequently modify.
+func shouldIgnoreFile(path string) bool {
+	base := filepath.Base(path)
+
+	// Ignore lock files: package-lock.json, yarn.lock, pnpm-lock.yaml, etc.
+	if strings.HasSuffix(base, "-lock.json") || strings.HasSuffix(base, ".lock") {
+		return true
+	}
+
+	return false
+}
+
 // New creates a new file system watcher and returns a channel of events.
 // It watches the given root path recursively for files with the specified extensions.
 func New(rootPath string, extensions []string) (<-chan Event, error) {
@@ -30,8 +54,8 @@ func New(rootPath string, extensions []string) (<-chan Event, error) {
 			return err
 		}
 		if info.IsDir() {
-			// Ignore node_modules and .git directories
-			if info.Name() == "node_modules" || info.Name() == ".git" {
+			// Skip ignored directories (node_modules, .next, .git, dist, build, .cache)
+			if ignoredDirs[info.Name()] {
 				return filepath.SkipDir
 			}
 			return watcher.Add(path)
@@ -57,6 +81,11 @@ func New(rootPath string, extensions []string) (<-chan Event, error) {
 				}
 
 				if event.Op.Has(fsnotify.Write) || event.Op.Has(fsnotify.Create) {
+					// Skip files that should be ignored (lock files, etc.)
+					if shouldIgnoreFile(event.Name) {
+						continue
+					}
+
 					isTarget := false
 					for _, ext := range extensions {
 						if strings.HasSuffix(event.Name, ext) {

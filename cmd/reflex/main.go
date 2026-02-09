@@ -48,10 +48,13 @@ import (
 
 // Default file extensions to watch.
 // These cover common web development file types.
+// Note: .json is intentionally excluded because build tools (Next.js, npm, etc.)
+// frequently modify package.json, lock files, and other JSON configs, causing
+// unwanted restarts.
 var defaultExtensions = []string{
 	".js", ".ts", ".jsx", ".tsx",
 	".css", ".scss", ".sass",
-	".json", ".mdx", ".md",
+	".mdx", ".md",
 	".html", ".vue", ".svelte",
 }
 
