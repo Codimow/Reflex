@@ -13,91 +13,111 @@ type Line struct {
 	Text string
 }
 
-// Manager runs and manages a child process.
+// Manager manages a child process.
 type Manager struct {
-	command   string
-	cmd       *exec.Cmd
-	outChan   chan Line
-	wg        sync.WaitGroup
-	mu        sync.Mutex
-	isRunning bool
+	command string
+	cmd     *exec.Cmd
+	output  chan Line
+	done    chan struct{}
+	mu      sync.Mutex
+	started bool
 }
 
-// NewManager creates a new process manager for the given command string.
+// NewManager creates a new Manager for the given command.
 func NewManager(command string) *Manager {
 	return &Manager{
 		command: command,
-		outChan: make(chan Line),
+		output:  make(chan Line, 100),
+		done:    make(chan struct{}),
 	}
 }
 
-// Output returns the channel that receives lines of output from the process.
-func (m *Manager) Output() <-chan Line {
-	return m.outChan
-}
-
-// Start executes the command and begins streaming its output.
+// Start runs the command via sh -c and captures stdout/stderr.
 func (m *Manager) Start() error {
 	m.mu.Lock()
-	if m.isRunning {
-		m.mu.Unlock()
-		return nil // Already running
+	defer m.mu.Unlock()
+
+	if m.started {
+		return nil
 	}
 
 	m.cmd = exec.Command("sh", "-c", m.command)
+
+	// Create a process group for clean termination
 	m.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdout, err := m.cmd.StdoutPipe()
 	if err != nil {
-		m.mu.Unlock()
 		return err
 	}
+
 	stderr, err := m.cmd.StderrPipe()
 	if err != nil {
-		m.mu.Unlock()
 		return err
 	}
 
 	if err := m.cmd.Start(); err != nil {
-		m.mu.Unlock()
 		return err
 	}
 
-	m.isRunning = true
-	m.mu.Unlock()
+	m.started = true
 
-	m.wg.Add(2)
-	go m.streamOutput(stdout, &m.wg)
-	go m.streamOutput(stderr, &m.wg)
+	// Combine stdout and stderr
+	var wg sync.WaitGroup
+	wg.Add(2)
 
+	readLines := func(r io.Reader) {
+		defer wg.Done()
+		scanner := bufio.NewScanner(r)
+		for scanner.Scan() {
+			select {
+			case <-m.done:
+				return
+			case m.output <- Line{Text: scanner.Text()}:
+			}
+		}
+	}
+
+	go readLines(stdout)
+	go readLines(stderr)
+
+	// Close output channel when both readers finish
 	go func() {
-		m.wg.Wait()
+		wg.Wait()
 		m.cmd.Wait()
-		m.mu.Lock()
-		m.isRunning = false
-		m.mu.Unlock()
-		close(m.outChan)
+		close(m.output)
 	}()
 
 	return nil
 }
 
-// Stop terminates the running process.
+// Stop kills the process and all its children.
 func (m *Manager) Stop() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if !m.isRunning || m.cmd == nil || m.cmd.Process == nil {
-		return nil // Not running
+	if !m.started || m.cmd == nil || m.cmd.Process == nil {
+		return nil
 	}
 
-	return syscall.Kill(-m.cmd.Process.Pid, syscall.SIGKILL)
+	// Signal done to stop readers
+	select {
+	case <-m.done:
+		// Already closed
+	default:
+		close(m.done)
+	}
+
+	// Kill the entire process group
+	pgid, err := syscall.Getpgid(m.cmd.Process.Pid)
+	if err == nil {
+		syscall.Kill(-pgid, syscall.SIGKILL)
+	}
+
+	return m.cmd.Wait()
 }
 
-func (m *Manager) streamOutput(r io.Reader, wg *sync.WaitGroup) {
-	defer wg.Done()
-	scanner := bufio.NewScanner(r)
-	for scanner.Scan() {
-		m.outChan <- Line{Text: scanner.Text()}
-	}
+// Output returns a channel of output lines.
+func (m *Manager) Output() <-chan Line {
+	return m.output
 }
